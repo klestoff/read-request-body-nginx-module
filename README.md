@@ -1,6 +1,6 @@
 # Module ngx_http_read_request_body_module
 
-The `ngx_http_read_request_body_module` module allows gain access to *$request_body* variable, even if not of `\*_pass` (`proxy_pass`, `fastcgi_pass`, etc.) directives is being used in current location
+The `ngx_http_read_request_body_module` module allows gain access to *$request_body* variable, even if not of `*_pass` (`proxy_pass`, `fastcgi_pass`, etc.) directives is being used in current location
 
 ## Configuration example
 
