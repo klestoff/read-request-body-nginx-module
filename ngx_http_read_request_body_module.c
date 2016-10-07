@@ -25,7 +25,7 @@ ngx_http_read_request_body(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_command_t ngx_http_read_request_body_module_commands[] = {
     {
         ngx_string("read_request_body"),
-        NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_NOARGS,
+        NGX_HTTP_SRV_CONF | NGX_HTTP_SIF_CONF | NGX_HTTP_LOC_CONF | NGX_HTTP_LIF_CONF | NGX_CONF_NOARGS,
         ngx_http_read_request_body,
         NGX_HTTP_LOC_CONF_OFFSET,
         0,
