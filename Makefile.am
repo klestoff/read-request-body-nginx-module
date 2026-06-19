@@ -13,6 +13,7 @@ ngx_http_read_request_body_module_la_CFLAGS = \
 	-I /usr/include/nginx/stream \
 	-I /usr/include/nginx/http \
 	-I /usr/include/nginx/http/v2 \
+	-I /usr/include/nginx/http/v3 \
 	-I /usr/include/nginx/http/modules \
 	-I /usr/include/nginx/http/modules/perl \
 	-I /usr/include/nginx/core \
@@ -22,6 +23,7 @@ ngx_http_read_request_body_module_la_CFLAGS = \
 	-I /usr/include/nginx/mail \
 	-I /usr/include/nginx/event \
 	-I /usr/include/nginx/event/modules \
+	-I /usr/include/nginx/event/quic \
 	#
 
 ngx_http_read_request_body_module_la_LDFLAGS = -version-info 0:0:0 -module -rpath $(libdir)/nginx/modules
