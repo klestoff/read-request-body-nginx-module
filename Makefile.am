@@ -26,7 +26,7 @@ ngx_http_read_request_body_module_la_CFLAGS = \
 	-I /usr/include/nginx/event/quic \
 	#
 
-ngx_http_read_request_body_module_la_LDFLAGS = -version-info 2:0:2 -module -rpath $(libdir)/nginx/modules
+ngx_http_read_request_body_module_la_LDFLAGS = -version-info 2:0:2 -module -rpath $(libdir)/nginx/modules -lz
 
 dist_modconf_DATA = mod-http-read-request-body.conf
 modconfdir = $(datadir)/nginx/modules-available
