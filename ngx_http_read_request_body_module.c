@@ -1,6 +1,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <zlib.h>
 
 typedef struct {
     ngx_chain_t *bufs;
@@ -22,6 +23,21 @@ ngx_http_read_request_body_merge_cf(ngx_conf_t *cf, void *parent, void *child);
 
 static char *
 ngx_http_read_request_body(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+
+static ngx_int_t
+decompress(ngx_http_request_t *, ngx_http_read_request_body_ctx_t *);
+static ngx_table_elt_t *content_encoding(const ngx_list_t *hdrs);
+
+static ngx_int_t
+gunzip_body(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx);
+static ngx_int_t
+inflate_body(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx);
+static ngx_int_t
+decomp(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx, int code);
+static ngx_int_t
+decomp_body(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx,
+        z_stream *, char *buf, size_t size);
+static ngx_chain_t *cpy(ngx_http_request_t *, const char *buf, size_t size);
 
 static ngx_command_t ngx_http_read_request_body_module_commands[] = {
     {
@@ -165,6 +181,10 @@ do_read(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx) {
         if (rc == NGX_OK) {
             r->read_event_handler = ngx_http_block_reading;
             ctx->done = 1;
+            rc = decompress(r, ctx);
+            if (rc != NGX_OK) {
+                // TODO
+            }
             r->request_body->bufs = ctx->bufs;
 #if defined(nginx_version) && nginx_version >= 8011
             r->main->count--;
@@ -249,7 +269,14 @@ ngx_http_read_request_body_post_handler(ngx_http_request_t *r)
         r->read_event_handler = on_read;
         do_read(r, ctx);
     } else {
+        ngx_int_t rc;
+
         ctx->done = 1;
+        rc = decompress(r, ctx);
+        if (rc != NGX_OK) {
+            // TODO
+        }
+
 #if defined(nginx_version) && nginx_version >= 8011
         r->main->count--;
 #endif
@@ -378,4 +405,191 @@ ngx_http_read_request_body(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     rrbcf->read_request_body = 1;
 
     return NGX_CONF_OK;
+}
+
+static ngx_int_t
+decompress(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx)
+{
+    static const char GZIP[] = "gzip";
+    static const char DEFLATE[] = "deflate";
+
+    ngx_table_elt_t *e = content_encoding(&r->headers_in.headers);
+    if (e == NULL) {
+        return NGX_OK;
+    }
+
+    const ngx_str_t *h = &e->value;
+    if (h->len == sizeof(GZIP) - 1 &&
+        ngx_strncmp(h->data, GZIP, sizeof(GZIP) - 1) == 0) {
+        ngx_int_t rc = gunzip_body(r, ctx);
+        if (rc == NGX_OK) {
+            e->hash = 0;
+        }
+        return rc;
+    }
+    if (h->len == sizeof(DEFLATE) - 1 &&
+        ngx_strncmp(h->data, DEFLATE, sizeof(DEFLATE) - 1) == 0) {
+        ngx_int_t rc = inflate_body(r, ctx);
+        if (rc == NGX_OK) {
+            e->hash = 0;
+        }
+        return rc;
+    }
+    return NGX_OK;
+}
+
+static ngx_table_elt_t *
+content_encoding(const ngx_list_t *hdrs)
+{
+    static const char HDR[] = "content-encoding";
+
+    const ngx_list_part_t *part = &hdrs->part;
+    do {
+        ngx_uint_t i;
+        for (i = 0; i < part->nelts; ++i) {
+            ngx_table_elt_t *e = (ngx_table_elt_t *)part->elts + i;
+            if (e->hash && e->key.len == sizeof(HDR) - 1 &&
+                ngx_strncmp(e->lowcase_key, HDR, sizeof(HDR) - 1) == 0) {
+                return e;
+            }
+        }
+        part = part->next;
+    } while (part != NULL);
+    return NULL;
+}
+
+static ngx_int_t
+gunzip_body(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx)
+{
+    return decomp(r, ctx, 31);
+}
+
+static ngx_int_t
+inflate_body(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx)
+{
+    return decomp(r, ctx, -15);
+}
+
+static ngx_int_t
+decomp(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx, int code)
+{
+    static const size_t buf_size = 1 << 15;
+
+    ngx_int_t rc;
+    z_stream zstream;
+    char *buf = ngx_palloc(r->pool, buf_size);
+    if (!buf) {
+        ngx_log_error(NGX_LOG_CRIT, r->connection->log, NGX_ENOMEM,
+                      "Oom allocating decompression buffer");
+        return NGX_ERROR;
+    }
+    memset(&zstream, 0, sizeof(zstream));
+    if (inflateInit2(&zstream, code) != Z_OK) {
+        ngx_log_error(NGX_LOG_CRIT, r->connection->log, NGX_ENOMEM,
+                      "Error initializing zstream");
+        return NGX_ERROR;
+    }
+
+    rc = decomp_body(r, ctx, &zstream, buf, buf_size);
+
+    inflateEnd(&zstream);
+
+    return rc;
+}
+
+static ngx_int_t
+decomp_body(ngx_http_request_t *r, ngx_http_read_request_body_ctx_t *ctx,
+            z_stream *z, char *buf, size_t size)
+{
+    ngx_chain_t out, *c, *last;
+
+    out.next = NULL;
+    last = &out;
+    for (c = ctx->bufs; c; c = c->next) {
+        ngx_buf_t *b = c->buf;
+        z->next_in = (Bytef *)b->pos;
+        z->avail_in = ngx_buf_size(b);
+        int rc;
+        do {
+            z->next_out  = (Bytef *)buf;
+            z->avail_out = size;
+            rc = inflate(z, 0);
+            if (rc != Z_OK && rc != Z_STREAM_END) {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, NGX_EINVAL,
+                              "Invalid compressed data");
+                return NGX_ERROR;
+            }
+            // copy [buf, buf + size - z->avail_out) to buffer
+            if (z->avail_out < size) {
+                ngx_chain_t *ch = cpy(r, buf, size - z->avail_out);
+                if (!ch) {
+                    return NGX_ERROR;
+                }
+                last->next = ch;
+                last = ch;
+            }
+        } while (rc == Z_OK && z->avail_in > 0);
+        // rc == Z_STREAM_END || rc == Z_OK && z->avail_in <= 0
+    }
+
+    z->next_in = NULL;
+    z->avail_in = 0;
+    int rc;
+    do {
+        z->next_out  = (Bytef *)buf;
+        z->avail_out = size;
+        rc = inflate(z, Z_FINISH);
+        if (rc != Z_OK && rc != Z_STREAM_END) {
+            ngx_log_error(NGX_LOG_WARN, r->connection->log, NGX_EINVAL,
+                          "Invalid compressed data");
+            return NGX_ERROR;
+        }
+        // copy [buf, buf + size - z->avail_out) to buffer
+        if (z->avail_out < size) {
+            ngx_chain_t *ch = cpy(r, buf, size - z->avail_out);
+            if (!ch) {
+                return NGX_ERROR;
+            }
+            last->next = ch;
+            last = ch;
+        }
+    } while (rc == Z_OK);
+    // rc == Z_STREAM_END
+
+    if (out.next) {
+        last->buf->last_buf = 1;
+        last->buf->last_in_chain = 1;
+
+        ctx->bufs = out.next;
+    }
+
+    return NGX_OK;
+}
+
+static ngx_chain_t *
+cpy(ngx_http_request_t *r, const char *buf, size_t size)
+{
+    ngx_chain_t *c;
+    ngx_buf_t *b;
+
+    c = ngx_alloc_chain_link(r->pool);
+    if (!c) {
+        ngx_log_error(NGX_LOG_CRIT, r->connection->log, NGX_ENOMEM,
+                      "Oom allocating buffer chain");
+        return NULL;
+    }
+    b = ngx_create_temp_buf(r->pool, size);
+    if (!b) {
+        ngx_log_error(NGX_LOG_CRIT, r->connection->log, NGX_ENOMEM,
+                      "Oom allocating temporary buffer");
+        return NULL;
+    }
+
+    memcpy(b->pos, buf, size);
+    b->last = b->pos + size;
+
+    c->buf  = b;
+    c->next = NULL;
+
+    return c;
 }
